@@ -10,24 +10,26 @@
            background: var(--tg-theme-bg-color, #fff);
            color: var(--tg-theme-text-color, #000); }
     h2 { margin: 4px 0 12px; }
+    h3 { margin: 14px 0 6px; }
     .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
-    button { padding: 8px 12px; border: none; border-radius: 8px; font-size: 14px;
+    button, select { padding: 8px 12px; border: none; border-radius: 8px; font-size: 14px;
              background: var(--tg-theme-secondary-bg-color, #eee);
              color: var(--tg-theme-text-color, #000); }
+    select { width: 100%; margin-bottom: 8px; }
     button.active { background: var(--tg-theme-button-color, #3390ec);
                     color: var(--tg-theme-button-text-color, #fff); }
-    .tier { margin: 8px 0; padding: 8px; border-radius: 8px;
+    .tier, .card { margin: 8px 0; padding: 8px; border-radius: 8px;
             background: var(--tg-theme-secondary-bg-color, #f2f2f2); }
     .tier b { display: inline-block; width: 24px; }
     .hero { display: inline-block; margin: 2px 8px 2px 0; }
+    .item { margin: 4px 0; }
     .muted { opacity: .7; font-size: 13px; }
   </style>
 </head>
 <body>
-  <h2>KaipenHub: тир-лист</h2>
-  <div class="row" id="periods"></div>
-  <div class="row" id="ranks"></div>
-  <div id="out">Загрузка...</div>
+  <h2>KaipenHub</h2>
+  <div class="row" id="tabs"></div>
+  <div id="view"></div>
 
   <script>
     const tg = window.Telegram.WebApp;
@@ -37,49 +39,83 @@
     const API = "https://api.deadlock-api.com";
     const RANKS = ["Initiate", "Seeker", "Alchemist", "Arcanist", "Ritualist",
                    "Emissary", "Archon", "Oracle", "Phantom", "Ascendant", "Eternus"];
+    const STAGES = [["early_game", "Начало игры"], ["mid_game", "Середина игры"],
+                    ["late_game", "Поздняя игра"]];
 
     const user = tg.initDataUnsafe.user;
     const lang = (user && user.language_code === "ru") ? "russian" : "english";
 
-    let period = 30;      // дней
-    let rank = "all";     // "all" или номер ранга 1..11
-    let names = null;     // кэш названий героев
+    let tab = "tier";
+    let period = 30;
+    let rank = "all";
+    let selectedHero = null;
+    let heroes = null;
+    let itemMap = null;
+
+    const $ = id => document.getElementById(id);
+
+    function el(tag, text, cls) {
+      const e = document.createElement(tag);
+      if (text !== undefined) e.textContent = text;   // textContent: безопасно, это не HTML
+      if (cls) e.className = cls;
+      return e;
+    }
 
     function makeButton(text, active, onClick) {
-      const b = document.createElement("button");
-      b.textContent = text;
-      if (active) b.className = "active";
+      const b = el("button", text, active ? "active" : "");
       b.onclick = onClick;
       return b;
     }
 
-    function renderControls() {
-      const p = document.getElementById("periods");
-      p.replaceChildren(
-        makeButton("7 дней", period === 7, () => { period = 7; update(); }),
-        makeButton("30 дней", period === 30, () => { period = 30; update(); })
+    async function getJson(path) {
+      const res = await fetch(API + path);
+      if (!res.ok) throw new Error(path + ": HTTP " + res.status);
+      return res.json();
+    }
+
+    async function loadHeroes() {
+      if (heroes) return heroes;
+      const raw = await getJson(`/v1/assets/heroes?language=${lang}`);
+      heroes = raw
+        .filter(h => h.player_selectable && !h.disabled && !h.in_development)
+        .map(h => ({ id: h.id, name: h.name, popular: h.popular_items || null }));
+      return heroes;
+    }
+
+    async function loadItems() {
+      if (itemMap) return itemMap;
+      itemMap = {};
+      try {
+        const arr = await getJson(`/v1/assets/items/by-type/upgrade?language=${lang}`);
+        arr.forEach(it => {
+          if (!it.name) return;
+          if (it.class_name) itemMap[it.class_name] = it.name;
+          if (it.id !== undefined) itemMap[it.id] = it.name;
+        });
+      } catch (e) { /* названия не загрузились, покажем технические */ }
+      return itemMap;
+    }
+
+    function prettyName(className) {
+      return className.replace(/^upgrade_/, "").replace(/_/g, " ");
+    }
+
+    function renderTabs() {
+      $("tabs").replaceChildren(
+        makeButton("Тир-лист", tab === "tier", () => { tab = "tier"; show(); }),
+        makeButton("Билды", tab === "builds", () => { tab = "builds"; show(); }),
+        makeButton("О боте", tab === "about", () => { tab = "about"; show(); })
       );
-      const r = document.getElementById("ranks");
-      const buttons = [makeButton("Все ранги", rank === "all", () => { rank = "all"; update(); })];
-      RANKS.forEach((name, i) => {
-        const n = i + 1;
-        buttons.push(makeButton(name, rank === n, () => { rank = n; update(); }));
-      });
-      r.replaceChildren(...buttons);
     }
 
-    async function loadNames() {
-      if (names) return names;
-      const res = await fetch(`${API}/v1/assets/heroes?language=${lang}`);
-      if (!res.ok) throw new Error("heroes: HTTP " + res.status);
-      const heroes = await res.json();
-      names = {};
-      heroes.forEach(h => {
-        if (h.player_selectable && !h.disabled && !h.in_development) names[h.id] = h.name;
-      });
-      return names;
+    function show() {
+      renderTabs();
+      if (tab === "tier") showTier();
+      else if (tab === "builds") showBuilds();
+      else showAbout();
     }
 
+    /* ---------- Тир-лист ---------- */
     function tierFor(diff) {
       if (diff >= 3) return "S";
       if (diff >= 1.5) return "A";
@@ -88,10 +124,20 @@
       return "D";
     }
 
-    async function update() {
-      renderControls();
-      const out = document.getElementById("out");
-      out.textContent = "Загрузка...";
+    function tierControls() {
+      const periods = el("div", undefined, "row");
+      [7, 30].forEach(p => periods.appendChild(
+        makeButton(p + " дней", period === p, () => { period = p; showTier(); })));
+      const ranks = el("div", undefined, "row");
+      ranks.appendChild(makeButton("Все ранги", rank === "all", () => { rank = "all"; showTier(); }));
+      RANKS.forEach((name, i) => ranks.appendChild(
+        makeButton(name, rank === i + 1, () => { rank = i + 1; showTier(); })));
+      return [periods, ranks];
+    }
+
+    async function showTier() {
+      const out = el("div", "Загрузка...");
+      $("view").replaceChildren(...tierControls(), out);
       try {
         const params = new URLSearchParams({
           min_unix_timestamp: Math.floor(Date.now() / 1000) - period * 86400
@@ -100,53 +146,110 @@
           params.set("min_average_badge", rank * 10 + 1);
           params.set("max_average_badge", rank * 10 + 6);
         }
-        const res = await fetch(`${API}/v1/analytics/hero-stats?${params}`);
-        if (!res.ok) throw new Error("stats: HTTP " + res.status);
-        const stats = await res.json();
-        const nameMap = await loadNames();
+        const stats = await getJson(`/v1/analytics/hero-stats?${params}`);
+        const list = await loadHeroes();
+        const nameMap = {};
+        list.forEach(h => nameMap[h.id] = h.name);
 
         const total = stats.reduce((s, h) => s + h.matches, 0);
-        const avgMatches = total / stats.length;
-        const minMatches = Math.max(50, avgMatches * 0.25);
-
-        let heroes = stats
+        const minMatches = Math.max(50, total / stats.length * 0.25);
+        const rows = stats
           .filter(h => h.matches >= minMatches && nameMap[h.hero_id])
           .map(h => ({ name: nameMap[h.hero_id], winrate: h.wins / h.matches * 100 }));
-        if (heroes.length === 0) { out.textContent = "Для этого фильтра мало данных."; return; }
+        if (rows.length === 0) { out.textContent = "Для этого фильтра мало данных."; return; }
 
-        const avg = heroes.reduce((s, h) => s + h.winrate, 0) / heroes.length;
-        heroes.sort((a, b) => b.winrate - a.winrate);
-
+        const avg = rows.reduce((s, h) => s + h.winrate, 0) / rows.length;
+        rows.sort((a, b) => b.winrate - a.winrate);
         const groups = { S: [], A: [], B: [], C: [], D: [] };
-        heroes.forEach(h => groups[tierFor(h.winrate - avg)].push(h));
+        rows.forEach(h => groups[tierFor(h.winrate - avg)].push(h));
 
         const nodes = [];
         for (const t of ["S", "A", "B", "C", "D"]) {
           if (groups[t].length === 0) continue;
-          const div = document.createElement("div");
-          div.className = "tier";
-          const b = document.createElement("b");
-          b.textContent = t;
-          div.appendChild(b);
-          groups[t].forEach(h => {
-            const s = document.createElement("span");
-            s.className = "hero";
-            s.textContent = `${h.name} ${h.winrate.toFixed(1)}%`;
-            div.appendChild(s);
-          });
+          const div = el("div", undefined, "tier");
+          div.appendChild(el("b", t));
+          groups[t].forEach(h => div.appendChild(
+            el("span", `${h.name} ${h.winrate.toFixed(1)}%`, "hero")));
           nodes.push(div);
         }
-        const note = document.createElement("div");
-        note.className = "muted";
-        note.textContent = `Выборка: ${total.toLocaleString("ru-RU")} игр героев`;
-        nodes.push(note);
+        nodes.push(el("div", `Выборка: ${total.toLocaleString("ru-RU")} игр героев`, "muted"));
         out.replaceChildren(...nodes);
       } catch (e) {
         out.textContent = "Не удалось загрузить данные: " + e.message;
       }
     }
 
-    update();
+    /* ---------- Билды ---------- */
+    async function showBuilds() {
+      $("view").replaceChildren(el("div", "Загрузка..."));
+      try {
+        const list = await loadHeroes();
+        const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
+        if (selectedHero === null) selectedHero = sorted[0].id;
+
+        const select = document.createElement("select");
+        sorted.forEach(h => {
+          const o = el("option", h.name);
+          o.value = h.id;
+          if (h.id === selectedHero) o.selected = true;
+          select.appendChild(o);
+        });
+        const box = el("div");
+        select.onchange = () => { selectedHero = Number(select.value); renderBuild(box); };
+        $("view").replaceChildren(select, box);
+        await renderBuild(box);
+      } catch (e) {
+        $("view").textContent = "Не удалось загрузить данные: " + e.message;
+      }
+    }
+
+    async function renderBuild(box) {
+      const hero = heroes.find(h => h.id === selectedHero);
+      const names = await loadItems();
+      if (!hero || !hero.popular) {
+        box.replaceChildren(el("div", "Для этого героя пока нет данных о предметах."));
+        return;
+      }
+      const nodes = [];
+      STAGES.forEach(([key, title]) => {
+        const items = (hero.popular[key] || [])
+          .slice().sort((a, b) => b.pick_pct - a.pick_pct).slice(0, 8);
+        if (items.length === 0) return;
+        const card = el("div", undefined, "card");
+        card.appendChild(el("b", title));
+        items.forEach(it => {
+          const name = names[it.class_name] || names[it.item_id] || prettyName(it.class_name);
+          card.appendChild(el("div",
+            `${name}: берут ${it.pick_pct.toFixed(0)}%, винрейт ${it.winrate_pct.toFixed(1)}%`, "item"));
+        });
+        nodes.push(card);
+      });
+      const ts = hero.popular.timestamp;
+      const date = ts ? new Date(ts * 1000).toLocaleDateString("ru-RU") : "дата неизвестна";
+      nodes.push(el("div",
+        `Самые часто покупаемые предметы героя. Обновлено: ${date}. ` +
+        "Период и ранги выбирает сам API, мы их не меняем.", "muted"));
+      box.replaceChildren(...nodes);
+    }
+
+    /* ---------- О боте ---------- */
+    function showAbout() {
+      const card = el("div", undefined, "card");
+      [
+        "KaipenHub: неофициальный бот и мини-приложение по игре Deadlock. Не связан с Valve.",
+        "Тир-лист героев по статистике матчей за 7 или 30 дней, с выбором ранга.",
+        "Билды: самые часто покупаемые предметы выбранного героя.",
+        "Данные: открытый проект Deadlock API (deadlock-api.com), он тоже не связан с Valve. " +
+        "Ярусы считаются по отклонению винрейта от среднего: это оценка, на малых выборках возможны случайные колебания.",
+        "Нашли ошибку или есть вопрос? Пишите @twoflk."
+      ].forEach(text => card.appendChild(el("p", text)));
+
+      const contact = makeButton("Написать @twoflk", true,
+        () => tg.openTelegramLink("https://t.me/twoflk"));
+      $("view").replaceChildren(card, contact);
+    }
+
+    show();
   </script>
 </body>
 </html>
