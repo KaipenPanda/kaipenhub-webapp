@@ -28,6 +28,11 @@
     .muted { opacity: .7; font-size: 13px; margin-top: 8px; }
     .card { margin: 8px 0; padding: 10px; border-radius: 12px; background: var(--card); }
 
+    .pix { width: 22px; height: 22px; border-radius: 6px; vertical-align: middle;
+           margin-right: 6px; flex: none; }
+    .pix.big { width: 40px; height: 40px; border-radius: 10px; margin-right: 10px; }
+    .herohead { display: flex; align-items: center; margin: 8px 0; font-size: 18px; font-weight: 700; }
+
     .tier { display: flex; gap: 10px; margin: 8px 0; padding: 10px;
             border-radius: 12px; background: var(--card); }
     .badge { flex: none; width: 34px; height: 34px; border-radius: 8px; color: #fff;
@@ -35,7 +40,9 @@
     .t-S { background: #e5484d; } .t-A { background: #f08c00; } .t-B { background: #c89b00; }
     .t-C { background: #3fa66a; } .t-D { background: #6b7a8f; }
     .heroes { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { padding: 4px 8px; border-radius: 8px; font-size: 14px; background: rgba(127,127,127,.15); }
+    .chip { display: inline-flex; align-items: center; padding: 4px 8px 4px 4px; border-radius: 8px;
+            font-size: 14px; background: rgba(127,127,127,.15); }
+    .chip .pix { margin-right: 5px; }
     .chip small { opacity: .7; margin-left: 4px; }
 
     .stage { margin: 8px 0; padding: 6px 10px; border-radius: 12px; background: var(--card); }
@@ -65,6 +72,9 @@
 
     // Иконки предметов принадлежат Valve. Включай только после проверки условий использования.
     const SHOW_ICONS = false;
+
+    // Сюда позже можно положить СВОИ рисунки героев: {76: "icons/graves.png"}
+    const OWN_ICONS = {};
 
     const API = "https://api.deadlock-api.com";
     const RANKS = ["Initiate", "Seeker", "Alchemist", "Arcanist", "Ritualist",
@@ -103,6 +113,62 @@
       return res.json();
     }
 
+    /* ---------- Пиксельные значки (идентиконы) ----------
+       Узор и цвет зависят ТОЛЬКО от номера героя. Они не изображают героя.
+       Не меняй формулу позже: иначе у всех героев сменятся значки. */
+    function mulberry32(a) {
+      return function () {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    const iconCache = {};
+    function pixelIcon(id) {
+      if (OWN_ICONS[id]) return OWN_ICONS[id];
+      if (iconCache[id]) return iconCache[id];
+
+      const rnd = mulberry32(id * 9973 + 12345);
+      const hue = Math.floor(rnd() * 360);
+
+      let cells, count;
+      do {                                   // повторяем, пока узор не слишком пустой
+        cells = []; count = 0;
+        for (let y = 0; y < 5; y++) {
+          for (let x = 0; x < 3; x++) {
+            const on = rnd() > 0.45;
+            cells.push(on);
+            if (on) count += x < 2 ? 2 : 1;
+          }
+        }
+      } while (count < 9);
+
+      let rects = "";
+      for (let y = 0; y < 5; y++) {
+        for (let x = 0; x < 3; x++) {
+          if (!cells[y * 3 + x]) continue;
+          rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
+          if (x < 2) rects += `<rect x="${4 - x}" y="${y}" width="1" height="1"/>`;  // зеркало
+        }
+      }
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -1 7 7">` +
+        `<rect x="-1" y="-1" width="7" height="7" rx="1" fill="hsl(${hue} 40% 22%)"/>` +
+        `<g fill="hsl(${hue} 70% 62%)" shape-rendering="crispEdges">${rects}</g></svg>`;
+      iconCache[id] = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+      return iconCache[id];
+    }
+
+    function heroImg(id, big) {
+      const img = el("img", undefined, big ? "pix big" : "pix");
+      img.src = pixelIcon(id);
+      img.alt = "";
+      return img;
+    }
+
+    /* ---------- Данные ---------- */
     async function loadHeroes() {
       if (heroes) return heroes;
       const raw = await getJson(`/v1/assets/heroes?language=${lang}`);
@@ -171,154 +237,4 @@
       $("view").replaceChildren(...tierControls(), out);
       try {
         const params = new URLSearchParams({
-          min_unix_timestamp: Math.floor(Date.now() / 1000) - period * 86400
-        });
-        if (rank !== "all") {
-          params.set("min_average_badge", rank * 10 + 1);
-          params.set("max_average_badge", rank * 10 + 6);
-        }
-        const stats = await getJson(`/v1/analytics/hero-stats?${params}`);
-        const list = await loadHeroes();
-        const nameMap = {};
-        list.forEach(h => nameMap[h.id] = h.name);
-
-        const total = stats.reduce((s, h) => s + h.matches, 0);
-        const minMatches = Math.max(50, total / stats.length * 0.25);
-        const rows = stats
-          .filter(h => h.matches >= minMatches && nameMap[h.hero_id])
-          .map(h => ({ name: nameMap[h.hero_id], winrate: h.wins / h.matches * 100 }));
-        if (rows.length === 0) { out.textContent = "Для этого фильтра мало данных."; return; }
-
-        const avg = rows.reduce((s, h) => s + h.winrate, 0) / rows.length;
-        rows.sort((a, b) => b.winrate - a.winrate);
-        const groups = { S: [], A: [], B: [], C: [], D: [] };
-        rows.forEach(h => groups[tierFor(h.winrate - avg)].push(h));
-
-        const nodes = [];
-        for (const t of ["S", "A", "B", "C", "D"]) {
-          if (groups[t].length === 0) continue;
-          const block = el("div", undefined, "tier");
-          block.appendChild(el("div", t, "badge t-" + t));
-          const wrap = el("div", undefined, "heroes");
-          groups[t].forEach(h => {
-            const chip = el("span", h.name + " ", "chip");
-            chip.appendChild(el("small", h.winrate.toFixed(1) + "%"));
-            wrap.appendChild(chip);
-          });
-          block.appendChild(wrap);
-          nodes.push(block);
-        }
-        nodes.push(el("div", `Выборка: ${total.toLocaleString("ru-RU")} игр героев`, "muted"));
-        out.replaceChildren(...nodes);
-      } catch (e) {
-        out.textContent = "Не удалось загрузить данные: " + e.message;
-      }
-    }
-
-    /* ---------- Билды ---------- */
-    async function showBuilds() {
-      $("view").replaceChildren(el("div", "Загрузка..."));
-      try {
-        const list = await loadHeroes();
-        const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
-        if (selectedHero === null) selectedHero = sorted[0].id;
-
-        const select = document.createElement("select");
-        sorted.forEach(h => {
-          const o = el("option", h.name);
-          o.value = h.id;
-          if (h.id === selectedHero) o.selected = true;
-          select.appendChild(o);
-        });
-        const box = el("div");
-        select.onchange = () => { selectedHero = Number(select.value); renderBuild(box); };
-        $("view").replaceChildren(select, box);
-        await renderBuild(box);
-      } catch (e) {
-        $("view").textContent = "Не удалось загрузить данные: " + e.message;
-      }
-    }
-
-    function itemRow(it, names) {
-      const info = names[it.class_name] || names[it.item_id];
-      const row = el("div", undefined, "irow");
-
-      const nameCell = el("div", undefined, "iname");
-      if (SHOW_ICONS && info && info.image) {
-        const img = el("img", undefined, "icon");
-        img.src = info.image;
-        img.alt = "";
-        img.loading = "lazy";
-        nameCell.appendChild(img);
-      }
-      nameCell.appendChild(el("span", info ? info.name : prettyName(it.class_name)));
-      row.appendChild(nameCell);
-
-      const pick = el("div", undefined, "pick");
-      const bar = document.createElement("i");
-      bar.style.width = Math.min(100, it.pick_pct) + "%";
-      pick.appendChild(bar);
-      pick.appendChild(el("b", it.pick_pct.toFixed(0) + "%"));
-      row.appendChild(pick);
-
-      const cls = it.winrate_pct >= 53 ? "wr good" : it.winrate_pct < 49 ? "wr bad" : "wr";
-      row.appendChild(el("div", it.winrate_pct.toFixed(1) + "%", cls));
-      return row;
-    }
-
-    async function renderBuild(box) {
-      const hero = heroes.find(h => h.id === selectedHero);
-      const names = await loadItems();
-      if (!hero || !hero.popular) {
-        box.replaceChildren(el("div", "Для этого героя пока нет данных о предметах."));
-        return;
-      }
-      const nodes = [];
-      STAGES.forEach(([key, title], idx) => {
-        const items = (hero.popular[key] || [])
-          .slice().sort((a, b) => b.pick_pct - a.pick_pct).slice(0, 8);
-        if (items.length === 0) return;
-
-        const det = document.createElement("details");
-        det.className = "stage";
-        if (idx === 0) det.open = true;           // раскрыта только первая стадия
-        det.appendChild(el("summary", title));
-
-        const head = el("div", undefined, "irow ihead");
-        ["Предмет", "Берут", "Винрейт"].forEach((text, i) => {
-          const c = el("div", text);
-          if (i === 2) c.style.textAlign = "right";
-          head.appendChild(c);
-        });
-        det.appendChild(head);
-        items.forEach(it => det.appendChild(itemRow(it, names)));
-        nodes.push(det);
-      });
-
-      const ts = hero.popular.timestamp;
-      const date = ts ? new Date(ts * 1000).toLocaleDateString("ru-RU") : "дата неизвестна";
-      nodes.push(el("div",
-        `Самые часто покупаемые предметы героя. Обновлено: ${date}. ` +
-        "Период и ранги выбирает сам API, мы их не меняем.", "muted"));
-      box.replaceChildren(...nodes);
-    }
-
-    /* ---------- О боте ---------- */
-    function showAbout() {
-      const card = el("div", undefined, "card");
-      [
-        "KaipenHub: неофициальный бот и мини-приложение по игре Deadlock. Не связан с Valve.",
-        "Тир-лист героев по статистике матчей за 7 или 30 дней, с выбором ранга.",
-        "Билды: самые часто покупаемые предметы выбранного героя.",
-        "Данные: открытый проект Deadlock API (deadlock-api.com), он тоже не связан с Valve. " +
-        "Ярусы считаются по отклонению винрейта от среднего: это оценка, на малых выборках возможны случайные колебания.",
-        "Нашли ошибку или есть вопрос? Пишите @twoflk."
-      ].forEach(text => card.appendChild(el("p", text)));
-      $("view").replaceChildren(card, makeButton("Написать @twoflk", true,
-        () => tg.openTelegramLink("https://t.me/twoflk")));
-    }
-
-    show();
-  </script>
-</body>
-</html>
+          min_unix_timestamp:
