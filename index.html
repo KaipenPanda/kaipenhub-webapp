@@ -155,38 +155,41 @@
       return res.json();
     }
 
-    /* ---------- Хранилище: облако Telegram, а в браузере localStorage ---------- */
-    function hasCloud() {
-      return !!(tg.CloudStorage && tg.CloudStorage.getItem);
+    /* ---------- Хранилище: облако Telegram + запасной localStorage ---------- */
+    const VERSION = "v3";
+    document.body.appendChild(el("div", "Версия страницы: " + VERSION, "muted"));
+
+    function useCloud() {
+      try {
+        return !!(tg.initData && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast("6.9"));
+      } catch (e) { return false; }
     }
+    function localGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+    function localSet(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+    function localDel(key) { try { localStorage.removeItem(key); } catch (e) {} }
+
     function storageGet(key) {
       return new Promise(resolve => {
+        if (!useCloud()) { resolve(localGet(key)); return; }
         try {
-          if (hasCloud()) {
-            tg.CloudStorage.getItem(key, (err, val) => resolve(err ? null : (val || null)));
-          } else {
-            resolve(localStorage.getItem(key));
-          }
-        } catch (e) { resolve(null); }
+          tg.CloudStorage.getItem(key, (err, val) => resolve(!err && val ? val : localGet(key)));
+        } catch (e) { resolve(localGet(key)); }
       });
     }
     function storageSet(key, value) {
+      localSet(key, value);                      // всегда сохраняем локально как запасной вариант
       return new Promise(resolve => {
-        try {
-          if (hasCloud()) tg.CloudStorage.setItem(key, value, () => resolve());
-          else { localStorage.setItem(key, value); resolve(); }
-        } catch (e) { resolve(); }
+        if (!useCloud()) { resolve(); return; }
+        try { tg.CloudStorage.setItem(key, value, () => resolve()); } catch (e) { resolve(); }
       });
     }
     function storageRemove(key) {
+      localDel(key);
       return new Promise(resolve => {
-        try {
-          if (hasCloud()) tg.CloudStorage.removeItem(key, () => resolve());
-          else { localStorage.removeItem(key); resolve(); }
-        } catch (e) { resolve(); }
+        if (!useCloud()) { resolve(); return; }
+        try { tg.CloudStorage.removeItem(key, () => resolve()); } catch (e) { resolve(); }
       });
     }
-
     /* ---------- Пиксельные значки (идентиконы) ----------
        Узор и цвет зависят ТОЛЬКО от номера героя и не изображают самого героя. */
     function mulberry32(a) {
