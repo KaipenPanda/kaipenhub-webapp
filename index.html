@@ -156,7 +156,7 @@
     }
 
     /* ---------- Хранилище: облако Telegram + запасной localStorage ---------- */
-    const VERSION = "v3";
+    const VERSION = "v4";
     document.body.appendChild(el("div", "Версия страницы: " + VERSION, "muted"));
 
     function useCloud() {
@@ -636,10 +636,12 @@
 
           const res = OUTCOMES[m.player_match_outcome] || ["?", ""];
           row.appendChild(el("div", res[0], "mres " + res[1]));
+          row.style.cursor = "pointer";
+          row.onclick = () => toggleAnalysis(m, nameMap, row);
           hist.appendChild(row);
         });
         hist.appendChild(el("div",
-          "Показаны последние 20 матчей. Разбор отдельного матча появится позже.", "muted"));
+          "Показаны последние 20 матчей. Нажми на матч, чтобы сравнить его со средним по герою.", "muted"));
         nodes.push(hist);
 
         nodes.push(deleteButton());
@@ -668,5 +670,6 @@
 
     show();
   </script>
+  <script src="analysis.js?v=1"></script>
 </body>
 </html>
