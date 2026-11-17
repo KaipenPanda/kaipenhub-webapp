@@ -132,6 +132,7 @@
     let selectedHero = null;
     let heroes = null;
     let itemMap = null;
+    let histCache = { id: null, time: 0, data: null };
 
     const $ = id => document.getElementById(id);
 
@@ -470,6 +471,18 @@
       return Number(n);
     }
 
+    // История матчей игрока. При ответе 429 API возвращает сохранённую историю, её тоже берём.
+    async function getHistory(id) {
+      const fresh = histCache.id === id && Date.now() - histCache.time < 5 * 60 * 1000;
+      if (fresh) return histCache.data;
+      const res = await fetch(`${API}/v1/players/${id}/match-history`);
+      if (!res.ok && res.status !== 429) throw new Error("match-history: HTTP " + res.status);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error("match-history: неожиданный ответ (HTTP " + res.status + ")");
+      histCache = { id: id, time: Date.now(), data: data };
+      return data;
+    }
+
     async function showProfile() {
       $("view").replaceChildren(el("div", "Загрузка..."));
       const saved = await storageGet("steam_id");
@@ -501,6 +514,14 @@
       $("view").replaceChildren(card);
     }
 
+    function deleteButton() {
+      return makeButton("Удалить мой номер", false, async () => {
+        await storageRemove("steam_id");
+        histCache = { id: null, time: 0, data: null };
+        showProfile();
+      });
+    }
+
     async function renderProfile(id) {
       const periods = el("div", undefined, "chips");
       [[7, "7 дней"], [30, "30 дней"], [0, "Всё время"]].forEach(([p, label]) =>
@@ -510,27 +531,37 @@
 
       try {
         const since = myPeriod === 0 ? 0 : Math.floor(Date.now() / 1000) - myPeriod * 86400;
-        const params = new URLSearchParams({ account_ids: String(id), min_unix_timestamp: since });
-        const [stats, list] = await Promise.all([
-          getJson(`/v1/analytics/hero-stats?${params}`), loadHeroes()
-        ]);
+        const [all, list] = await Promise.all([getHistory(id), loadHeroes()]);
         const nameMap = {};
         list.forEach(h => nameMap[h.id] = h.name);
 
-        const sum = key => stats.reduce((s, h) => s + h[key], 0);
-        const matches = sum("matches"), wins = sum("wins");
-        const nodes = [];
-        let histBox = null;
+        const inPeriod = all.filter(m => m.start_time >= since)
+                            .sort((a, b) => b.start_time - a.start_time);
+        if (inPeriod.length === 0) {
+          out.replaceChildren(
+            el("div", "По этому номеру нет матчей за период. Проверь номер: " +
+                      "данные могут обновляться с задержкой."),
+            deleteButton());
+          return;
+        }
 
-        if (matches === 0) {
-          nodes.push(el("div", "По этому номеру нет матчей за период. Проверь номер: " +
-                               "данные могут обновляться с задержкой."));
+        // В винрейт идут только засчитанные матчи: победа (1) или поражение (2)
+        const scored = inPeriod.filter(m => m.player_match_outcome === 1 || m.player_match_outcome === 2);
+        const wins = scored.filter(m => m.player_match_outcome === 1).length;
+        const losses = scored.length - wins;
+        const nodes = [];
+
+        if (scored.length === 0) {
+          nodes.push(el("div", "За период нет засчитанных матчей."));
         } else {
-          const wr = wins / matches * 100;
-          const kda = (sum("total_kills") + sum("total_assists")) / Math.max(sum("total_deaths"), 1);
+          const wr = wins / scored.length * 100;
+          const sumKey = key => scored.reduce((s, m) => s + m[key], 0);
+          const kda = (sumKey("player_kills") + sumKey("player_assists")) /
+                      Math.max(sumKey("player_deaths"), 1);
+
           const grid = el("div", undefined, "stats");
-          [["Матчей", String(matches), ""],
-           ["Побед", `${wins} / ${matches - wins}`, ""],
+          [["Засчитанных матчей", String(scored.length), ""],
+           ["Побед / поражений", `${wins} / ${losses}`, ""],
            ["Винрейт", wr.toFixed(1) + "%", wr >= 52 ? "good" : wr < 48 ? "bad" : ""],
            ["KDA", kda.toFixed(2), ""]].forEach(([label, value, cls]) => {
             const box = el("div", undefined, "stat");
@@ -539,9 +570,21 @@
             grid.appendChild(box);
           });
           nodes.push(grid);
+          nodes.push(el("div",
+            `Всего в истории за период: ${inPeriod.length}. Не засчитано (штраф, недействительные, ` +
+            `не засчитанные): ${inPeriod.length - scored.length}. В винрейт и KDA они не входят.`,
+            "muted"));
 
-          const top = [...stats].sort((a, b) => b.matches - a.matches).slice(0, 8);
-          const maxGames = top[0].matches;
+          // Любимые герои по засчитанным матчам
+          const byHero = {};
+          scored.forEach(m => {
+            const h = byHero[m.hero_id] || (byHero[m.hero_id] = { id: m.hero_id, games: 0, wins: 0 });
+            h.games += 1;
+            if (m.player_match_outcome === 1) h.wins += 1;
+          });
+          const top = Object.values(byHero).sort((a, b) => b.games - a.games).slice(0, 8);
+          const maxGames = top[0].games;
+
           const card = el("div", undefined, "card");
           card.appendChild(el("b", "Чаще всего играешь"));
           const hrow = el("div", undefined, "irow ihead");
@@ -554,63 +597,28 @@
           top.forEach(h => {
             const row = el("div", undefined, "irow");
             const nameCell = el("div", undefined, "iname");
-            nameCell.appendChild(heroImg(h.hero_id, false));
-            nameCell.appendChild(el("span", nameMap[h.hero_id] || ("#" + h.hero_id)));
+            nameCell.appendChild(heroImg(h.id, false));
+            nameCell.appendChild(el("span", nameMap[h.id] || ("#" + h.id)));
             row.appendChild(nameCell);
 
             const pick = el("div", undefined, "pick");
             const bar = document.createElement("i");
-            bar.style.width = (h.matches / maxGames * 100) + "%";
+            bar.style.width = (h.games / maxGames * 100) + "%";
             pick.appendChild(bar);
-            pick.appendChild(el("b", String(h.matches)));
+            pick.appendChild(el("b", String(h.games)));
             row.appendChild(pick);
 
-            const hwr = h.wins / h.matches * 100;
+            const hwr = h.wins / h.games * 100;
             row.appendChild(el("div", hwr.toFixed(1) + "%",
                                hwr >= 52 ? "wr good" : hwr < 48 ? "wr bad" : "wr"));
             card.appendChild(row);
           });
           nodes.push(card);
-          nodes.push(el("div", "Учитываются обычные матчи (рейтинговые и нет).", "muted"));
         }
 
-        // Блок истории матчей: загружается отдельно, чтобы сбой не ломал остальной профиль
-        histBox = el("div", "Загружаю историю матчей...", "muted");
-        nodes.push(histBox);
-
-        nodes.push(makeButton("Удалить мой номер", false, async () => {
-          await storageRemove("steam_id");
-          showProfile();
-        }));
-        out.replaceChildren(...nodes);
-        renderHistory(id, histBox, nameMap, since);
-      } catch (e) {
-        out.textContent = "Не удалось загрузить данные: " + e.message;
-      }
-    }
-
-    async function renderHistory(id, box, nameMap, since) {
-      try {
-        const all = await getJson(`/v1/players/${id}/match-history`);
-        const inPeriod = all.filter(m => m.start_time >= since)
-                            .sort((a, b) => b.start_time - a.start_time);
-        if (inPeriod.length === 0) {
-          box.className = "";
-          box.replaceChildren(el("div", "В истории нет матчей за этот период.", "muted"));
-          return;
-        }
-
-        const count = o => inPeriod.filter(m => m.player_match_outcome === o).length;
-        const w = count(1), l = count(2);
-        const other = inPeriod.length - w - l;
-
-        const card = el("div", undefined, "card");
-        card.appendChild(el("b", "История матчей"));
-        card.appendChild(el("div",
-          `В истории за период: ${inPeriod.length} матчей (побед ${w}, поражений ${l}, ` +
-          `других: ${other}). «Другие» это не засчитанные, штрафные и недействительные игры.`,
-          "muted"));
-
+        // История: все матчи, включая не засчитанные
+        const hist = el("div", undefined, "card");
+        hist.appendChild(el("b", "История матчей"));
         inPeriod.slice(0, 20).forEach(m => {
           const row = el("div", undefined, "mrow");
           const main = el("div", undefined, "mmain");
@@ -625,15 +633,16 @@
 
           const res = OUTCOMES[m.player_match_outcome] || ["?", ""];
           row.appendChild(el("div", res[0], "mres " + res[1]));
-          card.appendChild(row);
+          hist.appendChild(row);
         });
-
-        card.appendChild(el("div",
+        hist.appendChild(el("div",
           "Показаны последние 20 матчей. Разбор отдельного матча появится позже.", "muted"));
-        box.className = "";
-        box.replaceChildren(card);
+        nodes.push(hist);
+
+        nodes.push(deleteButton());
+        out.replaceChildren(...nodes);
       } catch (e) {
-        box.textContent = "История матчей недоступна: " + e.message;
+        out.textContent = "Не удалось загрузить данные: " + e.message;
       }
     }
 
