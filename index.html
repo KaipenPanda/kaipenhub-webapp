@@ -55,6 +55,9 @@
     .ihead { opacity: .6; font-size: 12px; border-top: none; }
     .iname { display: flex; align-items: center; gap: 6px; }
     .icon { width: 24px; height: 24px; border-radius: 4px; flex: none; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+    .s-weapon { background: #f08c00; } .s-vitality { background: #3fa66a; } .s-spirit { background: #9b6cff; }
+    .tiertag { font-size: 11px; opacity: .6; margin-left: 2px; }
     .pick { position: relative; height: 18px; border-radius: 6px; overflow: hidden;
             background: rgba(127,127,127,.2); text-align: center; font-size: 12px; line-height: 18px; }
     .pick i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); opacity: .45; }
@@ -66,6 +69,13 @@
     .stat { padding: 10px; border-radius: 12px; background: var(--card); }
     .stat b { display: block; font-size: 22px; }
     .stat span { font-size: 12px; opacity: .7; }
+
+    .mrow { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+            padding: 7px 0; border-top: 1px solid rgba(127,127,127,.2); }
+    .mmain { display: flex; align-items: center; min-width: 0; }
+    .mname { font-size: 14px; font-weight: 600; }
+    .msub { font-size: 12px; opacity: .7; }
+    .mres { font-size: 13px; font-weight: 700; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -105,6 +115,12 @@
                    "Emissary", "Archon", "Oracle", "Phantom", "Ascendant", "Eternus"];
     const STAGES = [["early_game", "Начало игры"], ["mid_game", "Середина игры"],
                     ["late_game", "Поздняя игра"]];
+    // player_match_outcome из документации API: 0 недействителен, 1 победа, 2 поражение,
+    // 3 и 4 штраф, 5 не засчитан
+    const OUTCOMES = {
+      0: ["Недействит.", ""], 1: ["Победа", "good"], 2: ["Поражение", "bad"],
+      3: ["Штраф", "bad"], 4: ["Штраф", "bad"], 5: ["Не засчитан", ""]
+    };
 
     const user = tg.initDataUnsafe.user;
     const lang = (user && user.language_code === "ru") ? "russian" : "english";
@@ -233,7 +249,8 @@
         const arr = await getJson(`/v1/assets/items/by-type/upgrade?language=${lang}`);
         arr.forEach(it => {
           if (!it.name) return;
-          const info = { name: it.name, image: it.image_webp || it.image || null };
+          const info = { name: it.name, image: it.image_webp || it.image || null,
+                         slot: it.item_slot_type || null, tier: it.item_tier || null };
           if (it.class_name) itemMap[it.class_name] = info;
           if (it.id !== undefined) itemMap[it.id] = info;
         });
@@ -243,6 +260,14 @@
 
     function prettyName(className) {
       return className.replace(/^upgrade_/, "").replace(/_/g, " ");
+    }
+
+    function fmtDuration(s) {
+      const m = Math.floor(s / 60), r = s % 60;
+      return m + ":" + String(r).padStart(2, "0");
+    }
+    function fmtDate(ts) {
+      return new Date(ts * 1000).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
     }
 
     function renderTabs() {
@@ -370,7 +395,9 @@
         img.loading = "lazy";
         nameCell.appendChild(img);
       }
+      if (info && info.slot) nameCell.appendChild(el("span", undefined, "dot s-" + info.slot));
       nameCell.appendChild(el("span", info ? info.name : prettyName(it.class_name)));
+      if (info && info.tier) nameCell.appendChild(el("span", "T" + info.tier, "tiertag"));
       row.appendChild(nameCell);
 
       const pick = el("div", undefined, "pick");
@@ -398,6 +425,10 @@
       head.appendChild(heroImg(hero.id, true));
       head.appendChild(document.createTextNode(hero.name));
       nodes.push(head);
+
+      nodes.push(el("div",
+        "Цвет точки: оранжевый оружие, зелёный живучесть, фиолетовый дух. T1–T4 уровень предмета.",
+        "muted"));
 
       STAGES.forEach(([key, title], idx) => {
         const items = (hero.popular[key] || [])
@@ -489,6 +520,7 @@
         const sum = key => stats.reduce((s, h) => s + h[key], 0);
         const matches = sum("matches"), wins = sum("wins");
         const nodes = [];
+        let histBox = null;
 
         if (matches === 0) {
           nodes.push(el("div", "По этому номеру нет матчей за период. Проверь номер: " +
@@ -542,13 +574,66 @@
           nodes.push(el("div", "Учитываются обычные матчи (рейтинговые и нет).", "muted"));
         }
 
+        // Блок истории матчей: загружается отдельно, чтобы сбой не ломал остальной профиль
+        histBox = el("div", "Загружаю историю матчей...", "muted");
+        nodes.push(histBox);
+
         nodes.push(makeButton("Удалить мой номер", false, async () => {
           await storageRemove("steam_id");
           showProfile();
         }));
         out.replaceChildren(...nodes);
+        renderHistory(id, histBox, nameMap, since);
       } catch (e) {
         out.textContent = "Не удалось загрузить данные: " + e.message;
+      }
+    }
+
+    async function renderHistory(id, box, nameMap, since) {
+      try {
+        const all = await getJson(`/v1/players/${id}/match-history`);
+        const inPeriod = all.filter(m => m.start_time >= since)
+                            .sort((a, b) => b.start_time - a.start_time);
+        if (inPeriod.length === 0) {
+          box.className = "";
+          box.replaceChildren(el("div", "В истории нет матчей за этот период.", "muted"));
+          return;
+        }
+
+        const count = o => inPeriod.filter(m => m.player_match_outcome === o).length;
+        const w = count(1), l = count(2);
+        const other = inPeriod.length - w - l;
+
+        const card = el("div", undefined, "card");
+        card.appendChild(el("b", "История матчей"));
+        card.appendChild(el("div",
+          `В истории за период: ${inPeriod.length} матчей (побед ${w}, поражений ${l}, ` +
+          `других: ${other}). «Другие» это не засчитанные, штрафные и недействительные игры.`,
+          "muted"));
+
+        inPeriod.slice(0, 20).forEach(m => {
+          const row = el("div", undefined, "mrow");
+          const main = el("div", undefined, "mmain");
+          main.appendChild(heroImg(m.hero_id, false));
+          const txt = el("div");
+          txt.appendChild(el("div", nameMap[m.hero_id] || ("#" + m.hero_id), "mname"));
+          txt.appendChild(el("div",
+            `${m.player_kills}/${m.player_deaths}/${m.player_assists} · ` +
+            `${fmtDuration(m.match_duration_s)} · ${fmtDate(m.start_time)}`, "msub"));
+          main.appendChild(txt);
+          row.appendChild(main);
+
+          const res = OUTCOMES[m.player_match_outcome] || ["?", ""];
+          row.appendChild(el("div", res[0], "mres " + res[1]));
+          card.appendChild(row);
+        });
+
+        card.appendChild(el("div",
+          "Показаны последние 20 матчей. Разбор отдельного матча появится позже.", "muted"));
+        box.className = "";
+        box.replaceChildren(card);
+      } catch (e) {
+        box.textContent = "История матчей недоступна: " + e.message;
       }
     }
 
@@ -559,7 +644,7 @@
         "KaipenHub: неофициальный бот и мини-приложение по игре Deadlock. Не связан с Valve.",
         "Тир-лист героев по статистике матчей за 7 или 30 дней, с выбором ранга.",
         "Билды: самые часто покупаемые предметы выбранного героя.",
-        "Профиль: твоя статистика по коду дружбы Steam.",
+        "Профиль: твоя статистика и история матчей по коду дружбы Steam.",
         "Значки героев: пиксельные узоры, которые генерируются из номера героя и не изображают самих героев.",
         "Данные: открытый проект Deadlock API (deadlock-api.com), он тоже не связан с Valve. " +
         "Ярусы считаются по отклонению винрейта от среднего: это оценка, на малых выборках возможны случайные колебания.",
