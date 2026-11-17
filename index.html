@@ -20,13 +20,16 @@
                      background: var(--card); color: var(--text); }
     button.active { background: var(--accent); color: var(--accent-text); }
     select { width: 100%; margin: 6px 0 8px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px; margin: 8px 0; border: none;
+            border-radius: 10px; font-size: 16px; background: rgba(127,127,127,.15); color: var(--text); }
     .tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px;
             padding: 8px 0; background: var(--bg); }
-    .tabs button { flex: 1; }
+    .tabs button { flex: 1; padding: 9px 4px; }
     .chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 6px; }
     .chips button { flex: none; white-space: nowrap; }
     .muted { opacity: .7; font-size: 13px; margin-top: 8px; }
     .card { margin: 8px 0; padding: 10px; border-radius: 12px; background: var(--card); }
+    .error { color: #e5484d; }
 
     .pix { width: 22px; height: 22px; border-radius: 6px; vertical-align: middle;
            margin-right: 6px; flex: none; }
@@ -58,21 +61,42 @@
     .pick b { position: relative; font-weight: 600; }
     .wr { text-align: right; font-weight: 600; }
     .good { color: #3fa66a; } .bad { color: #e5484d; }
+
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
+    .stat { padding: 10px; border-radius: 12px; background: var(--card); }
+    .stat b { display: block; font-size: 22px; }
+    .stat span { font-size: 12px; opacity: .7; }
   </style>
 </head>
 <body>
   <h2>KaipenHub</h2>
   <div class="tabs" id="tabs"></div>
-  <div id="view"></div>
+  <div id="view">Загрузка...</div>
+
+  <!-- Ловим ошибки и показываем их прямо на странице -->
+  <script>
+    window.addEventListener("error", function (e) {
+      var v = document.getElementById("view");
+      if (v) { v.textContent = "Ошибка в приложении: " + e.message; v.className = "error"; }
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      var v = document.getElementById("view");
+      var m = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+      if (v) { v.textContent = "Ошибка: " + m; v.className = "error"; }
+    });
+  </script>
 
   <script>
-    const tg = window.Telegram.WebApp;
+    // Если скрипт Telegram не загрузился, подставляем заглушку, чтобы страница не падала
+    const tg = (window.Telegram && window.Telegram.WebApp) || {
+      initDataUnsafe: {}, ready() {}, expand() {},
+      openTelegramLink(url) { window.open(url, "_blank"); }
+    };
     tg.ready();
     tg.expand();
 
     // Иконки предметов принадлежат Valve. Включай только после проверки условий использования.
     const SHOW_ICONS = false;
-
     // Сюда позже можно положить СВОИ рисунки героев: {76: "icons/graves.png"}
     const OWN_ICONS = {};
 
@@ -86,8 +110,9 @@
     const lang = (user && user.language_code === "ru") ? "russian" : "english";
 
     let tab = "tier";
-    let period = 30;
+    let period = 30;        // тир-лист: дней
     let rank = "all";
+    let myPeriod = 30;      // профиль: 7, 30 или 0 (всё время)
     let selectedHero = null;
     let heroes = null;
     let itemMap = null;
@@ -113,9 +138,40 @@
       return res.json();
     }
 
+    /* ---------- Хранилище: облако Telegram, а в браузере localStorage ---------- */
+    function hasCloud() {
+      return !!(tg.CloudStorage && tg.CloudStorage.getItem);
+    }
+    function storageGet(key) {
+      return new Promise(resolve => {
+        try {
+          if (hasCloud()) {
+            tg.CloudStorage.getItem(key, (err, val) => resolve(err ? null : (val || null)));
+          } else {
+            resolve(localStorage.getItem(key));
+          }
+        } catch (e) { resolve(null); }
+      });
+    }
+    function storageSet(key, value) {
+      return new Promise(resolve => {
+        try {
+          if (hasCloud()) tg.CloudStorage.setItem(key, value, () => resolve());
+          else { localStorage.setItem(key, value); resolve(); }
+        } catch (e) { resolve(); }
+      });
+    }
+    function storageRemove(key) {
+      return new Promise(resolve => {
+        try {
+          if (hasCloud()) tg.CloudStorage.removeItem(key, () => resolve());
+          else { localStorage.removeItem(key); resolve(); }
+        } catch (e) { resolve(); }
+      });
+    }
+
     /* ---------- Пиксельные значки (идентиконы) ----------
-       Узор и цвет зависят ТОЛЬКО от номера героя. Они не изображают героя.
-       Не меняй формулу позже: иначе у всех героев сменятся значки. */
+       Узор и цвет зависят ТОЛЬКО от номера героя и не изображают самого героя. */
     function mulberry32(a) {
       return function () {
         let t = a += 0x6D2B79F5;
@@ -127,30 +183,22 @@
 
     const iconCache = {};
     function pixelIcon(id) {
+      id = Number(id) || 0;
       if (OWN_ICONS[id]) return OWN_ICONS[id];
       if (iconCache[id]) return iconCache[id];
 
       const rnd = mulberry32(id * 9973 + 12345);
       const hue = Math.floor(rnd() * 360);
-
-      let cells, count;
-      do {                                   // повторяем, пока узор не слишком пустой
-        cells = []; count = 0;
-        for (let y = 0; y < 5; y++) {
-          for (let x = 0; x < 3; x++) {
-            const on = rnd() > 0.45;
-            cells.push(on);
-            if (on) count += x < 2 ? 2 : 1;
-          }
-        }
-      } while (count < 9);
+      const cells = [];
+      for (let i = 0; i < 15; i++) cells.push(rnd() > 0.45);          // поле 3 x 5
+      if (cells.filter(Boolean).length < 4) [2, 5, 8, 11, 14].forEach(i => cells[i] = true);
 
       let rects = "";
       for (let y = 0; y < 5; y++) {
         for (let x = 0; x < 3; x++) {
           if (!cells[y * 3 + x]) continue;
           rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
-          if (x < 2) rects += `<rect x="${4 - x}" y="${y}" width="1" height="1"/>`;  // зеркало
+          if (x < 2) rects += `<rect x="${4 - x}" y="${y}" width="1" height="1"/>`;   // зеркало
         }
       }
       const svg =
@@ -201,14 +249,17 @@
       $("tabs").replaceChildren(
         makeButton("Тир-лист", tab === "tier", () => { tab = "tier"; show(); }),
         makeButton("Билды", tab === "builds", () => { tab = "builds"; show(); }),
+        makeButton("Профиль", tab === "profile", () => { tab = "profile"; show(); }),
         makeButton("О боте", tab === "about", () => { tab = "about"; show(); })
       );
     }
 
     function show() {
+      $("view").className = "";
       renderTabs();
       if (tab === "tier") showTier();
       else if (tab === "builds") showBuilds();
+      else if (tab === "profile") showProfile();
       else showAbout();
     }
 
@@ -237,4 +288,288 @@
       $("view").replaceChildren(...tierControls(), out);
       try {
         const params = new URLSearchParams({
-          min_unix_timestamp:
+          min_unix_timestamp: Math.floor(Date.now() / 1000) - period * 86400
+        });
+        if (rank !== "all") {
+          params.set("min_average_badge", rank * 10 + 1);
+          params.set("max_average_badge", rank * 10 + 6);
+        }
+        const stats = await getJson(`/v1/analytics/hero-stats?${params}`);
+        const list = await loadHeroes();
+        const nameMap = {};
+        list.forEach(h => nameMap[h.id] = h.name);
+
+        const total = stats.reduce((s, h) => s + h.matches, 0);
+        const minMatches = Math.max(50, total / stats.length * 0.25);
+        const rows = stats
+          .filter(h => h.matches >= minMatches && nameMap[h.hero_id])
+          .map(h => ({ id: h.hero_id, name: nameMap[h.hero_id], winrate: h.wins / h.matches * 100 }));
+        if (rows.length === 0) { out.textContent = "Для этого фильтра мало данных."; return; }
+
+        const avg = rows.reduce((s, h) => s + h.winrate, 0) / rows.length;
+        rows.sort((a, b) => b.winrate - a.winrate);
+        const groups = { S: [], A: [], B: [], C: [], D: [] };
+        rows.forEach(h => groups[tierFor(h.winrate - avg)].push(h));
+
+        const nodes = [];
+        for (const t of ["S", "A", "B", "C", "D"]) {
+          if (groups[t].length === 0) continue;
+          const block = el("div", undefined, "tier");
+          block.appendChild(el("div", t, "badge t-" + t));
+          const wrap = el("div", undefined, "heroes");
+          groups[t].forEach(h => {
+            const chip = el("span", undefined, "chip");
+            chip.appendChild(heroImg(h.id, false));
+            chip.appendChild(document.createTextNode(h.name));
+            chip.appendChild(el("small", h.winrate.toFixed(1) + "%"));
+            wrap.appendChild(chip);
+          });
+          block.appendChild(wrap);
+          nodes.push(block);
+        }
+        nodes.push(el("div", `Выборка: ${total.toLocaleString("ru-RU")} игр героев`, "muted"));
+        out.replaceChildren(...nodes);
+      } catch (e) {
+        out.textContent = "Не удалось загрузить данные: " + e.message;
+      }
+    }
+
+    /* ---------- Билды ---------- */
+    async function showBuilds() {
+      $("view").replaceChildren(el("div", "Загрузка..."));
+      try {
+        const list = await loadHeroes();
+        const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
+        if (selectedHero === null) selectedHero = sorted[0].id;
+
+        const select = document.createElement("select");
+        sorted.forEach(h => {
+          const o = el("option", h.name);
+          o.value = h.id;
+          if (h.id === selectedHero) o.selected = true;
+          select.appendChild(o);
+        });
+        const box = el("div");
+        select.onchange = () => { selectedHero = Number(select.value); renderBuild(box); };
+        $("view").replaceChildren(select, box);
+        await renderBuild(box);
+      } catch (e) {
+        $("view").textContent = "Не удалось загрузить данные: " + e.message;
+      }
+    }
+
+    function itemRow(it, names) {
+      const info = names[it.class_name] || names[it.item_id];
+      const row = el("div", undefined, "irow");
+
+      const nameCell = el("div", undefined, "iname");
+      if (SHOW_ICONS && info && info.image) {
+        const img = el("img", undefined, "icon");
+        img.src = info.image;
+        img.alt = "";
+        img.loading = "lazy";
+        nameCell.appendChild(img);
+      }
+      nameCell.appendChild(el("span", info ? info.name : prettyName(it.class_name)));
+      row.appendChild(nameCell);
+
+      const pick = el("div", undefined, "pick");
+      const bar = document.createElement("i");
+      bar.style.width = Math.min(100, it.pick_pct) + "%";
+      pick.appendChild(bar);
+      pick.appendChild(el("b", it.pick_pct.toFixed(0) + "%"));
+      row.appendChild(pick);
+
+      const cls = it.winrate_pct >= 53 ? "wr good" : it.winrate_pct < 49 ? "wr bad" : "wr";
+      row.appendChild(el("div", it.winrate_pct.toFixed(1) + "%", cls));
+      return row;
+    }
+
+    async function renderBuild(box) {
+      const hero = heroes.find(h => h.id === selectedHero);
+      const names = await loadItems();
+      if (!hero || !hero.popular) {
+        box.replaceChildren(el("div", "Для этого героя пока нет данных о предметах."));
+        return;
+      }
+      const nodes = [];
+
+      const head = el("div", undefined, "herohead");
+      head.appendChild(heroImg(hero.id, true));
+      head.appendChild(document.createTextNode(hero.name));
+      nodes.push(head);
+
+      STAGES.forEach(([key, title], idx) => {
+        const items = (hero.popular[key] || [])
+          .slice().sort((a, b) => b.pick_pct - a.pick_pct).slice(0, 8);
+        if (items.length === 0) return;
+
+        const det = document.createElement("details");
+        det.className = "stage";
+        if (idx === 0) det.open = true;
+        det.appendChild(el("summary", title));
+
+        const hrow = el("div", undefined, "irow ihead");
+        ["Предмет", "Берут", "Винрейт"].forEach((text, i) => {
+          const c = el("div", text);
+          if (i === 2) c.style.textAlign = "right";
+          hrow.appendChild(c);
+        });
+        det.appendChild(hrow);
+        items.forEach(it => det.appendChild(itemRow(it, names)));
+        nodes.push(det);
+      });
+
+      const ts = hero.popular.timestamp;
+      const date = ts ? new Date(ts * 1000).toLocaleDateString("ru-RU") : "дата неизвестна";
+      nodes.push(el("div",
+        `Самые часто покупаемые предметы героя. Обновлено: ${date}. ` +
+        "Период и ранги выбирает сам API, мы их не меняем.", "muted"));
+      box.replaceChildren(...nodes);
+    }
+
+    /* ---------- Профиль ---------- */
+    function parseAccountId(text) {
+      const s = text.trim();
+      if (!/^\d{5,20}$/.test(s)) return null;
+      let n = BigInt(s);
+      const BASE = 76561197960265728n;          // SteamID64 -> короткий номер
+      if (n >= BASE) n -= BASE;
+      if (n <= 0n || n >= 4294967296n) return null;
+      return Number(n);
+    }
+
+    async function showProfile() {
+      $("view").replaceChildren(el("div", "Загрузка..."));
+      const saved = await storageGet("steam_id");
+      const id = saved ? Number(saved) : null;
+      if (!id) renderSteamForm();
+      else await renderProfile(id);
+    }
+
+    function renderSteamForm() {
+      const card = el("div", undefined, "card");
+      card.appendChild(el("p",
+        "Введи свой код дружбы Steam: Steam → Друзья → Добавить друга → «Ваш код дружбы». " +
+        "Подойдёт и SteamID64 из ссылки на профиль. Пароли и ключи вводить не нужно."));
+      const input = document.createElement("input");
+      input.type = "text";
+      input.inputMode = "numeric";
+      input.placeholder = "Например, 123456789";
+      const msg = el("div", "", "muted");
+      const save = makeButton("Сохранить", true, async () => {
+        const n = parseAccountId(input.value);
+        if (n === null) { msg.textContent = "Нужны только цифры: код дружбы или SteamID64."; return; }
+        await storageSet("steam_id", String(n));
+        showProfile();
+      });
+      card.append(input, save, msg);
+      card.appendChild(el("p",
+        "Номер хранится в облачном хранилище Telegram, привязанном к этому приложению, " +
+        "а не на нашем сервере.", "muted"));
+      $("view").replaceChildren(card);
+    }
+
+    async function renderProfile(id) {
+      const periods = el("div", undefined, "chips");
+      [[7, "7 дней"], [30, "30 дней"], [0, "Всё время"]].forEach(([p, label]) =>
+        periods.appendChild(makeButton(label, myPeriod === p, () => { myPeriod = p; renderProfile(id); })));
+      const out = el("div", "Загрузка...");
+      $("view").replaceChildren(periods, out);
+
+      try {
+        const since = myPeriod === 0 ? 0 : Math.floor(Date.now() / 1000) - myPeriod * 86400;
+        const params = new URLSearchParams({ account_ids: String(id), min_unix_timestamp: since });
+        const [stats, list] = await Promise.all([
+          getJson(`/v1/analytics/hero-stats?${params}`), loadHeroes()
+        ]);
+        const nameMap = {};
+        list.forEach(h => nameMap[h.id] = h.name);
+
+        const sum = key => stats.reduce((s, h) => s + h[key], 0);
+        const matches = sum("matches"), wins = sum("wins");
+        const nodes = [];
+
+        if (matches === 0) {
+          nodes.push(el("div", "По этому номеру нет матчей за период. Проверь номер: " +
+                               "данные могут обновляться с задержкой."));
+        } else {
+          const wr = wins / matches * 100;
+          const kda = (sum("total_kills") + sum("total_assists")) / Math.max(sum("total_deaths"), 1);
+          const grid = el("div", undefined, "stats");
+          [["Матчей", String(matches), ""],
+           ["Побед", `${wins} / ${matches - wins}`, ""],
+           ["Винрейт", wr.toFixed(1) + "%", wr >= 52 ? "good" : wr < 48 ? "bad" : ""],
+           ["KDA", kda.toFixed(2), ""]].forEach(([label, value, cls]) => {
+            const box = el("div", undefined, "stat");
+            box.appendChild(el("b", value, cls));
+            box.appendChild(el("span", label));
+            grid.appendChild(box);
+          });
+          nodes.push(grid);
+
+          const top = [...stats].sort((a, b) => b.matches - a.matches).slice(0, 8);
+          const maxGames = top[0].matches;
+          const card = el("div", undefined, "card");
+          card.appendChild(el("b", "Чаще всего играешь"));
+          const hrow = el("div", undefined, "irow ihead");
+          ["Герой", "Игры", "Винрейт"].forEach((text, i) => {
+            const c = el("div", text);
+            if (i === 2) c.style.textAlign = "right";
+            hrow.appendChild(c);
+          });
+          card.appendChild(hrow);
+          top.forEach(h => {
+            const row = el("div", undefined, "irow");
+            const nameCell = el("div", undefined, "iname");
+            nameCell.appendChild(heroImg(h.hero_id, false));
+            nameCell.appendChild(el("span", nameMap[h.hero_id] || ("#" + h.hero_id)));
+            row.appendChild(nameCell);
+
+            const pick = el("div", undefined, "pick");
+            const bar = document.createElement("i");
+            bar.style.width = (h.matches / maxGames * 100) + "%";
+            pick.appendChild(bar);
+            pick.appendChild(el("b", String(h.matches)));
+            row.appendChild(pick);
+
+            const hwr = h.wins / h.matches * 100;
+            row.appendChild(el("div", hwr.toFixed(1) + "%",
+                               hwr >= 52 ? "wr good" : hwr < 48 ? "wr bad" : "wr"));
+            card.appendChild(row);
+          });
+          nodes.push(card);
+          nodes.push(el("div", "Учитываются обычные матчи (рейтинговые и нет).", "muted"));
+        }
+
+        nodes.push(makeButton("Удалить мой номер", false, async () => {
+          await storageRemove("steam_id");
+          showProfile();
+        }));
+        out.replaceChildren(...nodes);
+      } catch (e) {
+        out.textContent = "Не удалось загрузить данные: " + e.message;
+      }
+    }
+
+    /* ---------- О боте ---------- */
+    function showAbout() {
+      const card = el("div", undefined, "card");
+      [
+        "KaipenHub: неофициальный бот и мини-приложение по игре Deadlock. Не связан с Valve.",
+        "Тир-лист героев по статистике матчей за 7 или 30 дней, с выбором ранга.",
+        "Билды: самые часто покупаемые предметы выбранного героя.",
+        "Профиль: твоя статистика по коду дружбы Steam.",
+        "Значки героев: пиксельные узоры, которые генерируются из номера героя и не изображают самих героев.",
+        "Данные: открытый проект Deadlock API (deadlock-api.com), он тоже не связан с Valve. " +
+        "Ярусы считаются по отклонению винрейта от среднего: это оценка, на малых выборках возможны случайные колебания.",
+        "Нашли ошибку или есть вопрос? Пишите @twoflk."
+      ].forEach(text => card.appendChild(el("p", text)));
+      $("view").replaceChildren(card, makeButton("Написать @twoflk", true,
+        () => tg.openTelegramLink("https://t.me/twoflk")));
+    }
+
+    show();
+  </script>
+</body>
+</html>
