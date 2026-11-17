@@ -72,7 +72,7 @@
       ["Смерти", m.player_deaths, row.total_deaths / n, false],
       ["Помощь", m.player_assists, row.total_assists / n, true],
       ["KDA", (m.player_kills + m.player_assists) / Math.max(m.player_deaths, 1),
-              (row.total_kills + row.total_assists) / Math.max(row.total_deaths, 1), true],
+              (row.total_kills + row.total_assists) / Math.max(row.total_deaths, 1), true, true],
       ["Добито", m.last_hits, row.total_last_hits / n, true],
       ["Денаи", m.denies, row.total_denies / n, true],
       ["Души", m.net_worth, row.total_net_worth / n, true]
@@ -84,14 +84,16 @@
     const head = el("div", undefined, "arow ahead");
     ["Показатель", "Ты", "Среднее", "Разница"].forEach(t => head.appendChild(el("div", t)));
     wrap.appendChild(head);
-
-    metrics.forEach(([label, you, avg, higherIsBetter]) => {
+    metrics.forEach(([label, you, avg, higherIsBetter, absolute]) => {
       const d = diffPct(you, avg);
       const r = el("div", undefined, "arow");
       r.appendChild(el("div", label));
       r.appendChild(el("div", fmt(you)));
       r.appendChild(el("div", fmt(avg)));
-      r.appendChild(el("div", diffText(d), diffClass(d, higherIsBetter)));
+      const shown = absolute
+        ? (you - avg >= 0 ? "+" : "−") + fmt(Math.abs(you - avg))
+        : diffText(d);
+      r.appendChild(el("div", shown, diffClass(d, higherIsBetter)));
       wrap.appendChild(r);
     });
 
